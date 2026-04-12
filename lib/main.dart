@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'app/router/app_router.dart';
+import 'app/theme/app_theme.dart';
 
 void main()async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,7 +15,11 @@ class DistanceTrackerApp  extends ConsumerWidget{
   Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp.router(
       title: 'Distance Tracker',
-
+      theme: AppTheme.light,
+      darkTheme: AppTheme.dark,
+      themeMode: ThemeMode.system,
+      routerConfig: appRouter,
+      debugShowCheckedModeBanner: false,
     );
   }
 }
