@@ -11,7 +11,7 @@ class AppBottomNav extends StatelessWidget {
       selectedIndex: currentIndex,
       onDestinationSelected: (i) {
         switch (i) {
-          case 0: context.go('/');
+          case 0: context.go('/tracking');
           case 1: context.go('/map');
           case 2: context.go('/history');
           case 3: context.go('/settings');
