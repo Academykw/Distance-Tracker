@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:latlong2/latlong.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../../shared/constants/app_constants.dart';
@@ -14,8 +14,10 @@ import '../../../../shared/utils/activity_detector.dart';
 import '../../../../shared/utils/haversine.dart';
 import '../../domain/models/tracking_state.dart';
 
-final gpsServiceProvider = Provider<GpsService>((_) => GpsService());
 
+
+
+final gpsServiceProvider = Provider<GpsService>((_) => GpsService());
 final appDatabaseProvider = Provider<AppDatabase>((_) => AppDatabase());
 
 final trackingNotifierProvider =
@@ -26,43 +28,44 @@ StateNotifierProvider<TrackingNotifier, TrackingState>(
   ),
 );
 
-// Convenience derived providers for the UI
-final distanceProvider = Provider<double>((ref) {
-  final state = ref.watch(trackingNotifierProvider);
-  return state.currentSession?.totalMeters ?? 0.0;
-});
+// Convenience providers
+final distanceProvider = Provider<double>(
+      (ref) => ref.watch(trackingNotifierProvider).currentSession?.totalMeters ?? 0.0,
+);
+final activityTypeProvider = Provider<ActivityType>(
+      (ref) => ref.watch(trackingNotifierProvider).currentSession?.activityType ?? ActivityType.unknown,
+);
+final currentSpeedProvider = Provider<double>(
+      (ref) => ref.watch(trackingNotifierProvider).lastWaypoint?.speedMs ?? 0.0,
+);
+final elapsedDurationProvider = Provider<Duration>(
+      (ref) => ref.watch(trackingNotifierProvider).elapsed,
+);
+final waypointsProvider = Provider<List<WaypointModel>>(
+      (ref) => ref.watch(trackingNotifierProvider).currentSession?.waypoints ?? [],
+);
+final routePointsProvider = Provider<List<LatLng>>(
+      (ref) {
+    final wps = ref.watch(waypointsProvider);
+    return wps.map((w) => LatLng(w.latitude, w.longitude)).toList();
+  },
+);
 
-final activityTypeProvider = Provider<ActivityType>((ref) {
-  final state = ref.watch(trackingNotifierProvider);
-  return state.currentSession?.activityType ?? ActivityType.unknown;
-});
-
-final currentSpeedProvider = Provider<double>((ref) {
-  final state = ref.watch(trackingNotifierProvider);
-  return state.lastWaypoint?.speedMs ?? 0.0;
-});
-
-final elapsedDurationProvider = Provider<Duration>((ref) {
-  final state = ref.watch(trackingNotifierProvider);
-  return state.currentSession?.elapsed ?? Duration.zero;
-});
-
-// ─── Notifier ────────────────────────────────────────────────────────────────
+// ─── Notifier ─────────────────────────────────────────────────────────────────
 
 class TrackingNotifier extends StateNotifier<TrackingState> {
   final GpsService _gps;
   final AppDatabase _db;
   StreamSubscription<WaypointModel>? _gpsSub;
+  Timer? _timer;
   final _uuid = const Uuid();
 
   TrackingNotifier(this._gps, this._db) : super(const TrackingState());
 
-  // ── Public actions ──────────────────────────────────────────────────────
-
   Future<void> startTracking() async {
     final hasPermission = await _gps.requestPermission();
     if (!hasPermission) {
-      state = state.copyWith(errorMessage: 'Location permission denied');
+      state = state.copyWith(errorMessage: 'Location permission denied. Please enable it in settings.');
       return;
     }
 
@@ -71,11 +74,12 @@ class TrackingNotifier extends StateNotifier<TrackingState> {
       startTime: DateTime.now(),
     );
 
-    // Persist new session row immediately
-    await _db.insertSession(SessionsCompanion.insert(
-      id: session.id,
-      startTime: session.startTime.toIso8601String(),
-    ));
+    await _db.insertSession({
+      'id': session.id,
+      'start_time': session.startTime.toIso8601String(),
+      'total_meters': 0.0,
+      'activity_type': 'unknown',
+    });
 
     state = state.copyWith(
       status: TrackingStatus.active,
@@ -83,35 +87,50 @@ class TrackingNotifier extends StateNotifier<TrackingState> {
       errorMessage: null,
     );
 
-    _startListening(session.id);
+    // Start a timer that fires every second to update elapsed time in UI
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (state.status == TrackingStatus.active) {
+        // Trigger rebuild by updating state with same session (elapsed recalculates from startTime)
+        state = state.copyWith(tickTime: DateTime.now());
+      }
+    });
+
+    _startGpsListening(session.id);
   }
 
   void pauseTracking() {
     _gpsSub?.pause();
+    _timer?.cancel();
     state = state.copyWith(status: TrackingStatus.paused);
   }
 
   void resumeTracking() {
     _gpsSub?.resume();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (state.status == TrackingStatus.active) {
+        state = state.copyWith(tickTime: DateTime.now());
+      }
+    });
     state = state.copyWith(status: TrackingStatus.active);
   }
 
   Future<void> stopTracking() async {
     _gpsSub?.cancel();
     _gpsSub = null;
+    _timer?.cancel();
+    _timer = null;
 
     final session = state.currentSession;
     if (session == null) return;
 
     final finished = session.copyWith(endTime: DateTime.now());
 
-    // Persist final state
-    await _db.updateSession(SessionsCompanion(
-      id: Value(finished.id),
-      endTime: Value(finished.endTime?.toIso8601String()),
-      totalMeters: Value(finished.totalMeters),
-      activityType: Value(finished.activityType.name),
-    ));
+    await _db.updateSession({
+      'id': finished.id,
+      'end_time': finished.endTime?.toIso8601String(),
+      'total_meters': finished.totalMeters,
+      'activity_type': finished.activityType.name,
+    });
 
     state = state.copyWith(
       status: TrackingStatus.finished,
@@ -119,71 +138,66 @@ class TrackingNotifier extends StateNotifier<TrackingState> {
     );
   }
 
-  void resetTracking() {
-    state = const TrackingState();
-  }
+  void resetTracking() => state = const TrackingState();
 
-  void changeUnit(UnitType unit) {
-    state = state.copyWith(displayUnit: unit);
-  }
+  void changeUnit(UnitType unit) => state = state.copyWith(displayUnit: unit);
 
-  // ── Private helpers ──────────────────────────────────────────────────────
+  void _startGpsListening(String sessionId) {
+    _gpsSub = _gps.positionStream.listen(
+          (waypoint) async {
+        if (!mounted) return;
 
-  void _startListening(String sessionId) {
-    _gpsSub = _gps.positionStream.listen((waypoint) async {
-      if (!mounted) return;
+        final session = state.currentSession;
+        if (session == null) return;
 
-      final session = state.currentSession;
-      if (session == null) return;
+        // Accumulate distance only if moving
+        double additionalMeters = 0.0;
+        if (session.waypoints.isNotEmpty) {
+          final last = session.waypoints.last;
+          // Skip points that are too close (< 1m) to reduce noise
+          final dist = haversineMeters(
+            last.latitude, last.longitude,
+            waypoint.latitude, waypoint.longitude,
+          );
+          if (dist < 1.0) return;
+          additionalMeters = dist;
+        }
 
-      // Calculate incremental distance from last known point
-      double additionalMeters = 0.0;
-      if (session.waypoints.isNotEmpty) {
-        final last = session.waypoints.last;
-        additionalMeters = haversineMeters(
-          last.latitude, last.longitude,
-          waypoint.latitude, waypoint.longitude,
+        final updatedWaypoints = [...session.waypoints, waypoint];
+        final updatedMeters = session.totalMeters + additionalMeters;
+        final activity = ActivityDetector.fromSpeed(waypoint.speedMs);
+
+        final updatedSession = session.copyWith(
+          waypoints: updatedWaypoints,
+          totalMeters: updatedMeters,
+          activityType: activity,
         );
-      }
 
-      // Only accumulate if device is actually moving
-      if (waypoint.speedMs < AppConstants.minMovementSpeedMs &&
-          session.waypoints.isNotEmpty) {
-        return;
-      }
+        // Save waypoint to DB (don't await — fire and forget to keep UI smooth)
+        _db.insertWaypoint({
+          'session_id': sessionId,
+          'latitude': waypoint.latitude,
+          'longitude': waypoint.longitude,
+          'accuracy': waypoint.accuracyMeters,
+          'speed_ms': waypoint.speedMs,
+          'timestamp': waypoint.timestamp.toIso8601String(),
+        });
 
-      final updatedWaypoints = [...session.waypoints, waypoint];
-      final updatedMeters = session.totalMeters + additionalMeters;
-      final activity = ActivityDetector.fromSpeed(waypoint.speedMs);
-
-      final updatedSession = session.copyWith(
-        waypoints: updatedWaypoints,
-        totalMeters: updatedMeters,
-        activityType: activity,
-      );
-
-      // Persist waypoint to DB
-      await _db.insertWaypoint(WaypointsCompanion.insert(
-        sessionId: sessionId,
-        latitude: waypoint.latitude,
-        longitude: waypoint.longitude,
-        accuracy: waypoint.accuracyMeters,
-        speedMs: waypoint.speedMs,
-        timestamp: waypoint.timestamp.toIso8601String(),
-      ));
-
-      state = state.copyWith(
-        currentSession: updatedSession,
-        lastWaypoint: waypoint,
-      );
-    }, onError: (e) {
-      state = state.copyWith(errorMessage: 'GPS error: $e');
-    });
+        state = state.copyWith(
+          currentSession: updatedSession,
+          lastWaypoint: waypoint,
+        );
+      },
+      onError: (e) {
+        state = state.copyWith(errorMessage: 'GPS error: $e');
+      },
+    );
   }
 
   @override
   void dispose() {
     _gpsSub?.cancel();
+    _timer?.cancel();
     super.dispose();
   }
 }
