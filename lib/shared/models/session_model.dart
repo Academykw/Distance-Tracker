@@ -1,11 +1,10 @@
 import 'waypoint_model.dart';
 
-// Represents one tracking session (run / jog / walk)
 class SessionModel {
   final String id;
   final DateTime startTime;
   final DateTime? endTime;
-  final double totalMeters;         // always stored as metres
+  final double totalMeters;
   final ActivityType activityType;
   final List<WaypointModel> waypoints;
 
@@ -18,22 +17,26 @@ class SessionModel {
     this.waypoints = const [],
   });
 
+  /// Total elapsed time for the session
+  Duration get elapsed {
+    final end = endTime ?? DateTime.now();
+    return end.difference(startTime);
+  }
+
   SessionModel copyWith({
     DateTime? endTime,
     double? totalMeters,
     ActivityType? activityType,
     List<WaypointModel>? waypoints,
-  }) => SessionModel(
-    id: id,
-    startTime: startTime,
-    endTime: endTime ?? this.endTime,
-    totalMeters: totalMeters ?? this.totalMeters,
-    activityType: activityType ?? this.activityType,
-    waypoints: waypoints ?? this.waypoints,
-  );
-
-  Duration get elapsed =>
-      (endTime ?? DateTime.now()).difference(startTime);
+  }) =>
+      SessionModel(
+        id: id,
+        startTime: startTime,
+        endTime: endTime ?? this.endTime,
+        totalMeters: totalMeters ?? this.totalMeters,
+        activityType: activityType ?? this.activityType,
+        waypoints: waypoints ?? this.waypoints,
+      );
 }
 
 enum ActivityType { walk, jog, run, unknown }
